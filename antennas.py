@@ -1122,7 +1122,7 @@ def prepDisc(centre, rot, start, p1, p2, n_patches, frac = 1.0):
     pl2 = p2[0] ; ph2 = p2[1]
 
     n_points = n_patches * 2 + 2
-    n_lines = 3 * int((n_points - 2)/2) + 1
+    n_lines = int(3 * np.rint((n_points - 2)/2.) + 1)
     n_lperp = 4
 
     loc = start
@@ -1174,7 +1174,7 @@ def prepDisc(centre, rot, start, p1, p2, n_patches, frac = 1.0):
 
 def rotateTo90(model, surface):
     rot = surface.transformdict['rot']
-    mrpt = int(90 / rot.angle) - 1
+    mrpt = int(np.rint(90 / rot.angle) - 1)
     txt = model.gm(newStructures=mrpt, rotX=rot.angles[0], rotY=rot.angles[1], rotZ=rot.angles[2])
 
     return txt
@@ -1227,7 +1227,7 @@ def createCanPatch(centre, rot, can = None, length = 0., first_seg = -1, frac = 
     n_patches = int(length / l)
     n_lperp = 4
     n_points = n_patches * 2 + 2
-    n_lines = 3 * int((n_points - 2)/2) + 1
+    n_lines = int(3 * np.rint((n_points - 2.)/2.) + 1)
 
     # xy plane example: point (radius,0,0)
     pl1 = rot.radius
@@ -1318,8 +1318,8 @@ def createCanPatch(centre, rot, can = None, length = 0., first_seg = -1, frac = 
     cpatch_surface.transformdict['rot'] = roth
 
     # always place the centre of the patch on the axis
-    n_rot = int(45. / rot.angle)
-    cpatch_surface.transformdict['finalspin'] = rot.angle * n_rot + ((1+n_rot) % 2) * rot.angle/2.
+    n_rot = np.rint(90. / rot.angle)
+    cpatch_surface.transformdict['finalspin'] = n_rot + (n_rot + 1)%2
     cpatch_surface.transformfn = completeDiscTransform
     n_cpatch = len(can.surfaces)
     can.surfaces.append(cpatch_surface)
@@ -1482,24 +1482,15 @@ def canexperiment():
     print('dim in m width of wedge: {:0.4f} height of wedge: {:0.4f}'.format(wwidth, wheight))
     print('fraction width of wedge: {:0.4f} height of wedge: {:0.4f}'.format(wwidth/wavelength, wheight/wavelength))
 
-    dangle = 90. / 5.
-
-    # modify wegoffset
-    # wegoffset = 0.0225
-    # wegoffset = 0.0241
-    if 18. == dangle:
-        #wegoffset = 0.023874
-        #wegoffset = 0.022
-        #wegoffset = 0.021
-        #wegoffset = 0.023
-        pass # wegoffset = 0.025
-    if 18. / 3. == dangle:
-        wegoffset = 0.023961509102665587
-        wegoffset = 0.02928628890325795
-        wegoffset = 0.028
-        #wegoffset = 0.024
-    if 18. / 5. == dangle:
-        wegoffset = 0.023968518127970767
+    # adjust the height of the patch to ensure that the feed is central
+    dangle = 90. / 9.
+    a1 = dangle * np.pi / 180
+    sinah = np.sin(a1/2)
+    lh = radius * sinah
+    n_patches_to_feed = np.rint((wegoffset - lh) / (2. * lh)) + .5
+    frac = wegoffset / (n_patches_to_feed * 2. * lh)
+    if frac < 0:
+        frac = 1.0
 
     centre = (.0,.0,.0)
     rot = Rotator(angle = dangle, x_radius = radius)
@@ -1526,7 +1517,7 @@ def canexperiment():
     can = Shape(material = al, n_points = n_feed_points, n_lines = n_feed_lines)
     setcoord(can.centre, centre)
 
-    can = createCanPatch(centre, rot, can = can, length = length, frac = 1.)
+    can = createCanPatch(centre, rot, can = can, length = length, frac = frac)
     if 0:
         for idx, s in enumerate(can.surfaces):
             print('{}: n_points: {} n_lines: {} surface: {}'.format(idx, s.points.shape[1], s.lines.shape[1], s.surface))
