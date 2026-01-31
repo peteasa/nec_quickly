@@ -573,8 +573,222 @@ def setcoord(points, point):
 # could split the above into a separate library file for now keep a single file
 # to make testing with FreeCAD easier
 
+class Cantenna(object):
+    def __init__(self, freqMHz = 0, diameter = 0., length = 0., wire_guage = 8):
+        self.verbose = False
+        self._freqMHz = freqMHz
+        self._length = length
+        self._wire_guage = wire_guage
+
+        self._iter = 0
+        self._iter_1 = -1
+        self._iter_2 = -1
+        self._diameter = np.zeros((5), dtype = float)
+        self._diameter[self._iter] = diameter
+        self._inside_length = np.zeros((5), dtype = float)
+
+    def __str__(self):
+        txt = '===============\nCantenna spec\n===============\n'
+        txt += 'wavelength waveguide: {:0.4f} free space: {:0.4f}\n'.format(self.wavelength_guide, self.wavelength)
+        txt += 'feed length: {:0.4f} pin distance from reflector: {:0.4f}\n'.format(self.feed_length, self.feed_pin_to_reflector)
+        txt += 'can inside length: {:0.4f} (distance pin feed to rim: {:0.4f})\n'.format(self.inside_length, self.edge_to_pin_feed)
+        txt += 'can diameter: {:0.4f} can radius: {:0.4f}\n'.format(self.diameter, self.diameter/2.)
+        txt += 'frequency min: {:0.3f} target: {:0.3f} max: {:0.3f}\n'.format(self.freq_minMHz, self.freqMHz, self.freq_maxMHz)
+        txt += 'frequency cutoff TE11: {:0.3f} secondary TM01: {:0.3f}\n'.format(self.freq_cutoffTE11MHz, self.freq_cutoffTM01MHz)
+        txt += '==============='
+        return txt
+
+    @property
+    def freqMHz(self):
+        return self._freqMHz
+
+    @property
+    def radius(self):
+        if not hasattr(self, '_radius'):
+            self._radius = self.diameter / 2.
+        return self._radius
+
+    @property
+    def diameter(self):
+        return self._diameter[self._iter]
+
+    @property
+    def inside_length(self):
+        self._inside_length[self._iter] = 3. * self.wavelength_guide / 4.
+        return self._inside_length[self._iter]
+
+    @inside_length.setter
+    def inside_length(self, value):
+        print('target inside length: {:0.4f}'.format(value))
+        self._iter_2 = self._iter_1
+        self._iter_1 = self._iter
+        self._inside_length[self._iter] = self.inside_length
+        self._iter += 1
+        self._iter = self._iter % self._inside_length.shape[0]
+        self._clear_derived()
+        pctchange = self._bound_pct(self.pctchange(value))
+        self._diameter[self._iter] = self._diameter[self._iter_1] * (1 + pctchange)
+        self._inside_length[self._iter] = self.inside_length
+
+    def _bound_pct(self, pctchange):
+        bound = 0.50
+        if bound < abs(pctchange):
+            _pctchange = pctchange
+            if 0 < pctchange:
+                pctchange = bound
+            else:
+                pctchange = -bound
+            print('WARNING diverging? pctchange {:0.4f} reduced: {:0.4f}'.format(_pctchange, pctchange))
+        elif abs(pctchange) < 0.0000000001:
+            pctchange = 0.0000000001
+            print('WARNING diverging? pctchange {:0.4f} increased: {:0.4f}'.format(_pctchange, pctchange))
+
+        return pctchange
+
+    def pctchange(self, value):
+        if -1 < self._iter_2:
+            grad = (self._diameter[self._iter_1] - self._diameter[self._iter_2]) / (self._inside_length[self._iter_1] - self._inside_length[self._iter_2])
+        else:
+            grad = -0.1 * self._diameter[self._iter_1] / self._inside_length[self._iter_1]
+
+        #print('grad {}'.format(grad))
+        diamest = self._diameter[self._iter_1] + (value - self._inside_length[self._iter_1]) * grad
+        #print('diamest: {}'.format(diamest))
+        pctchange = (diamest - self._diameter[self._iter_1]) / self._diameter[self._iter_1]
+        return pctchange
+
+    @property
+    def edge_to_pin_feed(self):
+        if not hasattr(self, '_edge_to_pin_feed'):
+            if self.verbose: print('new _edge_to_pin_feed')
+            self._edge_to_pin_feed = self.wavelength_guide / 2.
+        return self._edge_to_pin_feed
+
+    @property
+    def edge_to_wedge_feed(self):
+        if not hasattr(self, '_edge_to_wedge_feed'):
+            if self.verbose: print('new _edge_to_wedge_feed')
+            self._edge_to_wedge_feed = (3./4. - 0.14) * self.wavelength_guide
+        return self._edge_to_wedge_feed
+
+    @property
+    def feed_pin_to_reflector(self):
+        if not hasattr(self, '_feed_pin_to_reflector'):
+            if self.verbose: print('new _feed_pin_to_reflector')
+            self._feed_pin_to_reflector = self.wavelength_guide / 4.
+        return self._feed_pin_to_reflector
+
+    @property
+    def feed_wedge_to_reflector(self):
+        if not hasattr(self, '_feed_wedge_to_reflector'):
+            if self.verbose: print('new _feed_wedge_to_reflector')
+            self._feed_wedge_to_reflector = 0.14 * self.wavelength_guide
+        return self._feed_wedge_to_reflector
+
+    @property
+    def feed_radius(self):
+        if not hasattr(self, '_feed_radius'):
+            if self.verbose: print('new _feed_radius')
+            self._feed_radius = guage(self._wire_guage) / 2. # 2.74 / 2
+        return self._feed_radius
+
+    @property
+    def feed_length(self):
+        if not hasattr(self, '_feed_length'):
+            if self.verbose: print('new _feed_length')
+            self._feed_length = self.wavelength / 4.
+        return self._feed_length
+
+    @property
+    def wedge_width(self):
+        if not hasattr(self, '_wedge_width'):
+            if self.verbose: print('new _wedge_width')
+            self._wedge_width = 0.46 * self.wavelength
+        return self._wedge_width
+
+    @property
+    def freq_minMHz(self):
+        if not hasattr(self, '_freq_minMHz'):
+            if self.verbose: print('new _freq_minMHz')
+            self._freq_minMHz = c_0 * 1e-6 / self.upper_usable_length
+        return self._freq_minMHz
+
+    @property
+    def freq_maxMHz(self):
+        if not hasattr(self, '_freq_maxMHz'):
+            if self.verbose: print('new _freq_maxMHz')
+            self._freq_maxMHz = c_0 * 1e-6 / self.lower_usable_length
+        return self._freq_maxMHz
+
+    @property
+    def freq_cutoffTE11MHz(self):
+        if not hasattr(self, '_freq_cutoffTE11MHz'):
+            if self.verbose: print('new _freq_cutoffTE11MHz')
+            self._freq_cutoffTE11MHz = 1.8412 * c_0 * 1e-6 / (2. * np.pi * self.radius)
+        return self._freq_cutoffTE11MHz
+
+    @property
+    def freq_cutoffTM01MHz(self):
+        if not hasattr(self, '_freq_cutoffTM01MHz'):
+            if self.verbose: print('new _freq_cutoffTM01MHz')
+            self._freq_cutoffTM01MHz = 1.147 * c_0 * 1e-6 / (2. * np.pi * self.radius)
+        return self._freq_cutoffTM01MHz
+
+    @property
+    def wavelength(self):
+        if not hasattr(self, '_wavelength'):
+            if self.verbose: print('new _wavelength')
+            self._wavelength = c_0 * 1e-6 / self.freqMHz
+        return self._wavelength
+
+    @property
+    def wavelength_guide(self):
+        # lg
+        if not hasattr(self, '_wavelength_guide'):
+            if self.verbose: print('new _wavelength_guide')
+            lc2 = self.dominant_cutoff_length**2
+            wl2 = self.wavelength**2
+            if lc2 < wl2:
+                wl2 = lc2 - .00000001
+                print('WARNING dominant_cutoff_length < wavelength')
+            self._wavelength_guide = np.sqrt(lc2 * wl2 / (lc2 - wl2))
+        return self._wavelength_guide
+
+    @property
+    def lower_usable_length(self):
+        # ls
+        if not hasattr(self, '_lower_usable_length'):
+            if self.verbose: print('new _lower_usable_length')
+            self._lower_usable_length = 2.8 * self.diameter / 2.
+        return self._lower_usable_length
+
+    @property
+    def upper_usable_length(self):
+        # lu
+        if not hasattr(self, '_upper_usable_length'):
+            if self.verbose: print('new _upper_usable_length')
+            self._upper_usable_length = 3.2 * self.diameter / 2.
+        return self._upper_usable_length
+
+    @property
+    def dominant_cutoff_length(self):
+        # lc
+        if not hasattr(self, '_dominant_cutoff_length'):
+            if self.verbose: print('new _dominant_cutoff_length')
+            self._dominant_cutoff_length = 3.41 * self.diameter / 2.
+        return self._dominant_cutoff_length
+
+    def _clear_derived(self):
+        for n in ['_radius', '_lower_usable_length', '_upper_usable_length', '_dominant_cutoff_length',
+                  '_wavelength', '_wavelength_guide', '_freq_cutoffTE11MHz', '_freq_cutoffTM01MHz',
+                  '_freq_maxMHz', '_freq_minMHz',
+                  '_edge_to_pin_feed', '_edge_to_wedge_feed', '_feed_pin_to_reflector', '_feed_wedge_to_reflector',
+                  '_feed_length', '_feed_radius', '_wedge_width']:
+            # clear the out of date values
+            if hasattr(self, n): delattr(self, n)
+
 def midPoint(p0, p1):
-    return ((p0[0] + p1[0]) / 2, (p0[1] + p1[1]) / 2, (p0[2] + p1[2] / 2))
+    return ((p0[0] + p1[0]) / 2., (p0[1] + p1[1]) / 2., (p0[2] + p1[2] / 2.))
 
 def centreSquare(points, l1, l3):
     av = []
@@ -899,7 +1113,7 @@ def prepCylinder(centre, rot, start, p1, p2, l, n_points, n_lines, n_lperp, n_pa
 
     return cyl
 
-def prepDisc(centre, rot, start, p1, p2, n_patches):
+def prepDisc(centre, rot, start, p1, p2, n_patches, frac = 1.0):
     c1 = rot.c1
     c2 = rot.c2
     ct = rot.ct
@@ -907,8 +1121,8 @@ def prepDisc(centre, rot, start, p1, p2, n_patches):
     pl1 = p1[0] ; ph1 = p1[1]
     pl2 = p2[0] ; ph2 = p2[1]
 
-    n_points = 4
-    n_lines = 4
+    n_points = n_patches * 2 + 2
+    n_lines = 3 * int((n_points - 2)/2) + 1
     n_lperp = 4
 
     loc = start
@@ -927,26 +1141,34 @@ def prepDisc(centre, rot, start, p1, p2, n_patches):
 
     surface = disc.surface
 
-    setcoord(disc.points[:, point], pointNew(c1, c2, ct, cntr, pl1, ph1)) ; point += 1
-    setcoord(disc.points[:, point], pointNew(c1, c2, ct, cntr, pl2, ph2)) ; point += 1
-    # line indexes are 1 based rather than zero based to allow negation
-    setcoord(disc.lines[:, line], (point - 2, point - 1)) ; line += 1 # 1:0->1
+    pldiff = pl1 - pl2
+    phdiff = ph2 - ph1
+    for p in range(n_patches + 1):
+        if p:
+            setcoord(disc.points[:, point], pointNew(c1, c2, ct, cntr, pl3, ph3)) ; point += 1
+            setcoord(disc.points[:, point], pointNew(c1, c2, ct, cntr, pl4, ph4)) ; point += 1
+            if line < 2:
+                setcoord(disc.lines[:, line], (disc.lines[1, line - 1], point - 2)) ; line += 1 # 1:1->2
+            else:
+                setcoord(disc.lines[:, line], (disc.lines[0, line - 2], point - 2)) ; line += 1 # 4:2->4
 
-    pl3 = pl2 - (ph2 - ph1)
-    ph3 = ph2 - (pl1 - pl2)
+            setcoord(disc.lines[:, line], (point - 2, point - 1)) ; line += 1 # 2:2->3; 5:4->5
+            setcoord(disc.lines[:, line], (point - 1, disc.lines[0, line - 3])) ; line += 1 # 3:3->0
+            if line < 5:
+                setcoord(surface[:, p - 1], (line - 3, line - 2, line - 1, line)) #lines: 1,2,3,4
+            else:
+                setcoord(surface[:, p - 1], (4 - line, line - 2, line - 1, line)) #lines: -3,4,5,6
+        else:
+            setcoord(disc.points[:, point], pointNew(c1, c2, ct, cntr, pl1, ph1)) ; point += 1
+            setcoord(disc.points[:, point], pointNew(c1, c2, ct, cntr, pl2, ph2)) ; point += 1
+            # line indexes are 1 based rather than zero based to allow negation
+            setcoord(disc.lines[:, line], (point - 2, point - 1)) ; line += 1 # 0:0->1
 
-    setcoord(disc.points[:, point], pointNew(c1, c2, ct, cntr, pl3, ph3)) ; point += 1
-    setcoord(disc.lines[:, line], (point - 2, point - 1)) ; line += 1 # 2:1->2
-
-    pl4 = pl1 - (ph2 - ph1)
-    ph4 = ph1 - (pl1 - pl2)
-
-    setcoord(disc.points[:, point], pointNew(c1, c2, ct, cntr, pl4, ph4)) ; point += 1
-    setcoord(disc.lines[:, line], (point - 2, point - 1)) ; line += 1 # 3:2->3
-
-    setcoord(disc.lines[:, line], (point - 1, point - 4)) ; line += 1 # 4:2->3
-
-    setcoord(surface[:, 0], (line - 3, line - 2, line - 1, line)) #lines: 1,2,3,4
+        pl3 = pl2 - phdiff * frac
+        ph3 = ph2 - pldiff * frac
+        pl4 = pl1 - phdiff * frac
+        ph4 = ph1 - pldiff * frac
+        pl1 = pl4 ; ph1 = ph4 ; pl2 = pl3 ; ph2 = ph3
 
     return disc
 
@@ -987,7 +1209,7 @@ def completeDiscTransform(model, disc_surface):
 
     return txt
 
-def createCanPatch(centre, rot, can = None, length = 0., first_seg = -1, material = None, materials = None):
+def createCanPatch(centre, rot, can = None, length = 0., first_seg = -1, frac = 1., material = None, materials = None):
     # patch size calculated with half the angle
     a1 = rot.angle * np.pi / 180
     sinah = np.sin(a1/2)
@@ -998,7 +1220,7 @@ def createCanPatch(centre, rot, can = None, length = 0., first_seg = -1, materia
     la = rot.radius * cosah
 
     # length of each square patch
-    l = lh * 2
+    l = lh * 2 * frac
 
     if first_seg < 0: first_seg = l
 
@@ -1040,6 +1262,22 @@ def createCanPatch(centre, rot, can = None, length = 0., first_seg = -1, materia
     cplength = diagonal / np.sqrt(2.)
     print('length', cplength, diagonal, 2 * cplength * cplength, diagonal * diagonal)
 
+    # calculate the intersection of the patch with the axis to ensure no gaps
+    # with the central patch and the surrounding can rim
+    # angle: radius / diagonal; is constant
+    # each new patch reduces diagonal by 2 * lh
+    # compare the axis intersection with the size of the central patch
+    # cplength < (diagonal - 2 * lh * n) * pl1 / diagonal
+    n_patches = 0
+    factor = 2 * lh * pl1 / diagonal
+    for n in range(10):
+        if cplength < (pl1 - n * factor * frac):
+            n_patches = n + 1
+        else:
+            print('SUCCESS: centre cube covered with {}: {} > {}'.format(
+                n_patches, cplength, (pl1 - n * factor)))
+            break
+
     if 0 == rot.ct:
         norm = 0.  # elevation angle relative to the x-y plane of the normal vector
         azim = 0.  # azimuth angle from the x-axis of the normal vector
@@ -1052,9 +1290,7 @@ def createCanPatch(centre, rot, can = None, length = 0., first_seg = -1, materia
 
     start = .0
 
-    n_patches = 1 # only one patch supported for now
-
-    disc_surface = prepDisc(centre, rot, start, (pl1, ph1), (pl2, ph2), n_patches)
+    disc_surface = prepDisc(centre, rot, start, (pl1, ph1), (pl2, ph2), n_patches, frac = frac)
 
     # override initial patch default to append to cylinder
     disc_surface.patchdict[0] = disc_surface.Oper.APPEND
@@ -1080,7 +1316,10 @@ def createCanPatch(centre, rot, can = None, length = 0., first_seg = -1, materia
     roth = Rotator(-rot.angle/2, rot.x_radius, rot.y_radius, rot.z_radius)
 
     cpatch_surface.transformdict['rot'] = roth
-    cpatch_surface.transformdict['finalspin'] = 5
+
+    # always place the centre of the patch on the axis
+    n_rot = int(45. / rot.angle)
+    cpatch_surface.transformdict['finalspin'] = rot.angle * n_rot + ((1+n_rot) % 2) * rot.angle/2.
     cpatch_surface.transformfn = completeDiscTransform
     n_cpatch = len(can.surfaces)
     can.surfaces.append(cpatch_surface)
@@ -1192,18 +1431,29 @@ def canexperiment():
     al = Material('Aluminium', 'al', cond_al)
     targetMHz = 2437.
 
-    wavelength = 1e-6 * c_0 / targetMHz
-    vf = 1.0
-    length_ideal = vf * wavelength
-
     lp = 2 * 0.007958
     radius = lp / (2 * np.sin(18 * np.pi / (180 * 2)))
     length = 0.135
 
-    print('target frequency: {:0.1f} MHz'.format(targetMHz))
-    print('wavelength: {:0.4f} can length: {:0.4f} m'.format(wavelength, length))
+    coffeecan =  Cantenna(freqMHz = targetMHz, diameter = radius * 2, wire_guage = 9)
+    print(coffeecan)
+    print('wedge type element: {:0.4f} wedge width: {:0.4f}'.format(
+        coffeecan.feed_wedge_to_reflector, coffeecan.wedge_width))
 
-    print('radius: {} patch size: {} can length: {}'.format(radius, lp, length))
+    wavelength = 1e-6 * c_0 / targetMHz
+    vf = wavelength / coffeecan.wavelength_guide
+    length_ideal = 3. * wavelength / (4. * vf)
+
+    a = 2 * np.pi / wavelength
+    b = 1.8412 / radius
+    print('ideal guide wavelength: {:0.4f}'.format(2 * np.pi / np.sqrt(a*a + b*b)))
+
+    print('target frequency: {:0.1f} MHz velocity factor: {:0.4f}'.format(targetMHz, vf))
+    print('wavelength: {:0.4f} guide length: {:0.4f} can length: {:0.4f} m'.format(wavelength, coffeecan.wavelength_guide, length))
+
+    print('dim in m radius: {:0.4f} patch size: {:0.6f} can length: {:0.4f}'.format(radius, lp, length))
+    print('fraction radius: {:0.4f} patch size: {:0.4f} can length: {:0.4f}'.format(
+        radius/coffeecan.wavelength_guide, lp/coffeecan.wavelength_guide, length/coffeecan.wavelength_guide))
 
     # match original dimensions from https://www.extremetech.com/archive/56984-building-a-wifi-antenna-out-of-a-tin-can
     wegoffset = 0.028
@@ -1224,11 +1474,34 @@ def canexperiment():
     print('stublength: {:0.4f} wedge length: {:0.4f} wedge width cos: {:0.4f} wedge vertical cos: {:0.4f}'.format(stublength, wegc, wegwcos, wegvcos))
     print('check: {:0.8f} {:0.8f} and: {:0.8f} {:0.8f}'.format(wleft, wegl*wegwsin, wup, wegu*wegvsin))
 
-    print('ideal wedge length: {} actual wedge length: {}'.format(wavelength / 5, stublength + wegc))
-    print('ideal wedge offset: {} actual wedge offset: {}'.format(7 * wavelength / 32, wegoffset))
+    print('dim in m ideal wedge length: {:0.4f} actual wedge length: {:0.4f}'.format(wavelength / 5, stublength + wegc))
+    print('fraction ideal wedge length: {:0.4f} actual wedge length: {:0.4f}'.format(1 / 5, stublength + wegc / wavelength
+                                                                                     ))
+    print('ideal wedge offset: {:0.4f} actual wedge offset: {:0.4f}'.format(7 * wavelength / 32, wegoffset))
+    wwidth = wleft + wright ; wheight = wdown + wup
+    print('dim in m width of wedge: {:0.4f} height of wedge: {:0.4f}'.format(wwidth, wheight))
+    print('fraction width of wedge: {:0.4f} height of wedge: {:0.4f}'.format(wwidth/wavelength, wheight/wavelength))
+
+    dangle = 90. / 5.
+
+    # modify wegoffset
+    # wegoffset = 0.0225
+    # wegoffset = 0.0241
+    if 18. == dangle:
+        #wegoffset = 0.023874
+        #wegoffset = 0.022
+        #wegoffset = 0.021
+        #wegoffset = 0.023
+        pass # wegoffset = 0.025
+    if 18. / 3. == dangle:
+        wegoffset = 0.023961509102665587
+        wegoffset = 0.02928628890325795
+        wegoffset = 0.028
+        #wegoffset = 0.024
+    if 18. / 5. == dangle:
+        wegoffset = 0.023968518127970767
 
     centre = (.0,.0,.0)
-    dangle = 18
     rot = Rotator(angle = dangle, x_radius = radius)
     c1 = rot.c1
     c2 = rot.c2
@@ -1253,10 +1526,20 @@ def canexperiment():
     can = Shape(material = al, n_points = n_feed_points, n_lines = n_feed_lines)
     setcoord(can.centre, centre)
 
-    can = createCanPatch(centre, rot, can = can, length = length)
-    if 1:
+    can = createCanPatch(centre, rot, can = can, length = length, frac = 1.)
+    if 0:
         for idx, s in enumerate(can.surfaces):
             print('{}: n_points: {} n_lines: {} surface: {}'.format(idx, s.points.shape[1], s.lines.shape[1], s.surface))
+    if 1:
+        # use the centre of the cylinder patch to select a suitable feed point (wegoffset)
+        for idx, l in enumerate(can.surfaces[0].surface[2, :]):
+            point = can.surfaces[0].lines[0, abs(l)-1]
+            pos = can.surfaces[0].points[rot.ct, point]
+            if idx:
+                diff = pre - pos
+                print('patch centre {}: {}'.format(idx - 1, pos + diff / 2))
+
+            pre = pos
 
     # now create the feed wedge
     point = 0 ; line = 0
@@ -1306,7 +1589,7 @@ def canexperiment():
 
     createNEC2Cards('can', comments,
                     wavelength, wireRadius, segmentsize, [can],
-                    targetMHz, plotStart = startMHz / targetMHz, plotRange = rangeMHz / targetMHz)
+                    targetMHz, plotStart = startMHz / targetMHz, plotRange = rangeMHz / targetMHz, plotStepCount = plotStepCount)
 
 if __name__ == '__main__':
     canexperiment()
