@@ -104,7 +104,6 @@ class GeoElement(object):
     def lines(self):
         '''required point pairs (from; too): these define the lines in the shape
         '''
-        # TODO how to handle curves?
         return self._lines
 
     @property
@@ -573,6 +572,136 @@ def setcoord(points, point):
 # could split the above into a separate library file for now keep a single file
 # to make testing with FreeCAD easier
 
+class DataStore(object):
+    def __init__(self, n_values = 0, n_samples = 0):
+        self._startdir = None
+        self._levels = {}
+        self._dataidxs = {}
+        self._dataidx = 0
+        self._datastore = (NOPOINT-1) * np.ones((n_values, n_samples), dtype = float)
+        self._n_sample = 0
+        self._finish_init()
+
+    def _finish_init(self):
+        self._startdir = dir(self)
+
+    @property
+    def datastore(self):
+        return self._datastore
+
+    @property
+    def n_sample(self):
+        return self._n_sample
+
+    @n_sample.setter
+    def n_sample(self, value):
+        self._n_sample = value
+
+    @property
+    def dataidxs(self):
+        return self._dataidxs
+
+    @property
+    def attributenames(self):
+        return [a for a in dir(self) if not a in self._startdir]
+
+    def createdafter(self, level):
+        return [a for a in dir(self) if not a in self._levels[level]]
+
+    def __setattr__(self, a, v):
+        if '_' in a[0]:
+            super().__setattr__(a, v)
+        elif a in self.dataidxs:
+            print('data: {} = {} not setable!'.format(a, v))
+        else:
+            super().__setattr__(a, v)
+
+    def __getattr__(self, a):
+        if a in self.dataidxs:
+            return self.datastore[self.dataidxs[a], self.n_sample]
+        else:
+            super().__getattr__(a)
+
+    def setdata(self, name, value):
+        if name not in self.dataidxs:
+            self.dataidxs[name] = self._dataidx
+            self._dataidx += 1
+        self.datastore[self.dataidxs[name], self.n_sample] = value
+
+    def pop(self, name):
+        value = None
+        if hasattr(self, name):
+            value = getattr(self, name)
+
+        if not name in self._startdir:
+            if hasattr(self, name):
+                delattr(self, name)
+
+        return value
+
+    def keep_attributes(self, level):
+        self._levels[level] = dir(self)
+
+    def clear_to(self, level):
+        if level in self._levels:
+            items = [a for a in dir(self) if not a in self._levels[level]]
+            for name in items:
+                self.pop(name)
+        else:
+            self.keep_attributes(level)
+
+class Sequencer(DataStore):
+    def __init__(self, filename, n_values, n_samples):
+        self._filename = filename
+        self._results = DataStore(n_values, n_samples)
+        super().__init__(0,0)
+
+    def __iter__(self):
+        for self.results.n_sample in range(self.results.datastore.shape[1]):
+            yield self.results.n_sample
+            value = getattr(self, self.variable)
+            setattr(self, self.variable, value + getattr(self, '{}_delta'.format(self.variable)))
+
+    @property
+    def filename(self):
+        return self._filename
+
+    @property
+    def results(self):
+        return self._results
+
+    def setresult(self, name, value):
+        self.results.setdata(name, value)
+
+    def prep_gather(self, n_csvrows, titles):
+        self.titles = titles
+        self.idxs = (NOPOINT-1) * np.ones((len(self.titles)), dtype = int)
+        self.csvalues = (NOPOINT-1) * np.ones((len(self.titles), n_csvrows), dtype = float)
+
+    def gather_results(self, resultspostprocess):
+        with open('{}.csv'.format(self.filename), newline='') as csvfile:
+            data = csv.reader(csvfile, delimiter=',')
+            for idx, row in enumerate(data):
+                if idx:
+                    for i in range(len(self.titles)):
+                        self.csvalues[i, idx - 1] = float(row[self.idxs[i]])
+                elif self.idxs[0] < 0 or self.idxs[1] < 0:
+                    for i, title in enumerate(self.titles):
+                        for idx, val in enumerate(row):
+                            if title in val:
+                                break
+
+                        self.idxs[i] = idx
+
+            resultspostprocess(self)
+
+    def save_results(self):
+        with open('{}_res.csv'.format(self.filename), 'w', newline='') as csvfile:
+            data = csv.writer(csvfile, delimiter=',')
+            data.writerow(self.results.dataidxs.keys())
+            for i in range(self.results.datastore.shape[1]):
+                data.writerow(self.results.datastore[:, i].tolist())
+
 class Cantenna(object):
     def __init__(self, freqMHz = 0, diameter = 0., length = 0., wire_guage = 8):
         self.verbose = False
@@ -651,9 +780,7 @@ class Cantenna(object):
         else:
             grad = -0.1 * self._diameter[self._iter_1] / self._inside_length[self._iter_1]
 
-        #print('grad {}'.format(grad))
         diamest = self._diameter[self._iter_1] + (value - self._inside_length[self._iter_1]) * grad
-        #print('diamest: {}'.format(diamest))
         pctchange = (diamest - self._diameter[self._iter_1]) / self._diameter[self._iter_1]
         return pctchange
 
@@ -689,7 +816,7 @@ class Cantenna(object):
     def feed_radius(self):
         if not hasattr(self, '_feed_radius'):
             if self.verbose: print('new _feed_radius')
-            self._feed_radius = guage(self._wire_guage) / 2. # 2.74 / 2
+            self._feed_radius = guage(self._wire_guage) / 2.
         return self._feed_radius
 
     @property
@@ -1058,7 +1185,7 @@ def createGridCircle(centre, n_radii, n_rings, feed = (), feedline = NOPOINT-1, 
 
     return grid
 
-def prepCylinder(centre, rot, start, p1, p2, l, n_points, n_lines, n_lperp, n_patches):
+def prepCylinder(centre, rot, start, p1, p2, l, n_points, n_lines, n_lperp, n_patches, frac_clen = -1):
     c1 = rot.c1
     c2 = rot.c2
     ct = rot.ct
@@ -1098,7 +1225,11 @@ def prepCylinder(centre, rot, start, p1, p2, l, n_points, n_lines, n_lperp, n_pa
                 # line 2 is 2->3; square patch 1 requires 3->2->4->5->3 so line 2 is reversed (-ve)
                 setcoord(surface[:, i - 1], (4 - line, line - 2, line - 1, line)) #lines: -3,4,5,6
 
-            loc += l
+            if i < 2:
+                if 0 < frac_clen: loc += l * frac_clen
+                else: loc += l
+            else:
+                loc += l
         else:
             # rotate around the patch in a right handed way
             # normal to the patch towards the centre if l is negative
@@ -1107,7 +1238,8 @@ def prepCylinder(centre, rot, start, p1, p2, l, n_points, n_lines, n_lperp, n_pa
             setcoord(cyl.points[:, point], pointNew(c1, c2, ct, cntr, pl2, ph2)) ; point += 1
             setcoord(cyl.lines[:, line], (point - 2, point - 1)) ; line += 1 # 0:0->1
 
-            loc += l
+            if 0 < frac_clen: loc += l * frac_clen
+            else: loc += l
 
         cntr = centreNew(ct, centre, loc)
 
@@ -1209,7 +1341,9 @@ def completeDiscTransform(model, disc_surface):
 
     return txt
 
-def createCanPatch(centre, rot, can = None, length = 0., first_seg = -1, frac = 1., material = None, materials = None):
+def createCanPatch(centre, rot, can = None, length = 0.,
+                   first_seg = -1, frac = 1., frac_clen = 0.5,
+                   material = None, materials = None):
     # patch size calculated with half the angle
     a1 = rot.angle * np.pi / 180
     sinah = np.sin(a1/2)
@@ -1224,7 +1358,8 @@ def createCanPatch(centre, rot, can = None, length = 0., first_seg = -1, frac = 
 
     if first_seg < 0: first_seg = l
 
-    n_patches = int(length / l)
+    n_patches = int(np.rint(length / l))
+    if 0 < frac_clen: n_patches += 1
     n_lperp = 4
     n_points = n_patches * 2 + 2
     n_lines = int(3 * np.rint((n_points - 2.)/2.) + 1)
@@ -1236,9 +1371,10 @@ def createCanPatch(centre, rot, can = None, length = 0., first_seg = -1, frac = 
     pl2 = rot.radius * np.cos(a1) # = radius - l * sinah # cos2a = 1 - 2sin^2a
     ph2 = rot.radius * np.sin(a1) # = l * cosah # sin2a = 2sinacosa
 
-    start = l * n_patches
+    if 0 < frac_clen: start = l * (n_patches - 2) + 2. * l * frac_clen
+    else: start = l * n_patches
     cyl_surface = prepCylinder(centre, rot, start, (pl1, ph1), (pl2, ph2), -l,
-                               n_points, n_lines, n_lperp, n_patches)
+                               n_points, n_lines, n_lperp, n_patches, frac_clen = frac_clen)
 
     if can is None:
         # the surface patch is appended to the surfaces of a Shape
@@ -1255,12 +1391,9 @@ def createCanPatch(centre, rot, can = None, length = 0., first_seg = -1, frac = 
 
     # The central patch will be created with a single NEC2 card
     lcpcentre = centrePatch(cyl_surface, n_patches - 1)
-    print('centre patch', lcpcentre)
-    print(pointNew(rot.c1, rot.c2, rot.ct, centre, lcpcentre[rot.c1], lcpcentre[rot.c2]))
     diagonal = distance(pointNew(rot.c1, rot.c2, rot.ct, centre, lcpcentre[rot.c1], lcpcentre[rot.c2]),
                         centre)
     cplength = diagonal / np.sqrt(2.)
-    print('length', cplength, diagonal, 2 * cplength * cplength, diagonal * diagonal)
 
     # calculate the intersection of the patch with the axis to ensure no gaps
     # with the central patch and the surrounding can rim
@@ -1328,7 +1461,7 @@ def createCanPatch(centre, rot, can = None, length = 0., first_seg = -1, frac = 
 
 def dipoleexperiment():
     al = Material('Aluminium', 'al', cond_al)
-    targetMHz = 137.5 # 300 # 1420 # MHz
+    targetMHz = 137.5
 
     # dipole calculator http://www.csgnetwork.com/antennaedcalc.html
     wavelength = 1e-6 * c_0 / targetMHz
@@ -1338,11 +1471,11 @@ def dipoleexperiment():
     # it is also determined by the inductance / capacitance per unit length of a transmission line
     # so in this case the inductance / capacitance per unit length of the wire comes into play!
     vf = 1.0 # ideal velocity factor! the actual dipole length could be shorter
-    length_ideal = vf * wavelength / 2 # 10.973
-    length = 0.52 * 2 # 1.3 # 1.426 # 0.475 # 1.426
+    length_ideal = vf * wavelength / 2
+    length = 0.52 * 2
     angle = 60 * 2
 
-    height_above = 10.0 #1.0 # 0.5 #5. # height above the ground
+    height_above = 10.0 # height above the ground
     if 0 < height_above:
         gndepsilon = 0
     else:
@@ -1358,7 +1491,7 @@ def dipoleexperiment():
     print('segment size: {:0.4f}'.format(1/segperwave))
 
     # ideal: dipole fed from middle of feedline
-    feedlinelength = 0.015 # segmentsize # 97.245 # 3*segmentsize # 92.428
+    feedlinelength = 0.015 # should be about segmentsize
     print('segment size: {:0.4f}'.format(1/segperwave))
 
     dipole = createTriDipole((0,0, height_above), length, feedlinelength, angle, materials = [al,al,al])
@@ -1399,13 +1532,11 @@ def quadloopexperiment():
 
     n_squares = 1
     startpoint = 0.0
-    # separation = endpoint / (n_squares - 1)
     squares = []
     for e in range(n_squares):
         centre = (0, startpoint, 0)
         feed = (-length/2, startpoint, 0)
         squares.append(createOblong(centre, feed = feed, x_size = length, z_size = length, material = cu))
-        # startpoint += separation
 
     n_squares = len(squares)
 
@@ -1427,36 +1558,29 @@ def quadloopexperiment():
                         targetMHz, plotStart = 1, plotRange = 0.000001,
                         i1 = extypeI, f6 = imoment )
 
-def canexperiment():
+def canexperiment(seq):
     al = Material('Aluminium', 'al', cond_al)
     targetMHz = 2437.
+    seq.targetMHz = targetMHz
 
     lp = 2 * 0.007958
     radius = lp / (2 * np.sin(18 * np.pi / (180 * 2)))
-    length = 0.135
+    target_canlength = seq.target_canlength
 
     coffeecan =  Cantenna(freqMHz = targetMHz, diameter = radius * 2, wire_guage = 9)
     print(coffeecan)
-    print('wedge type element: {:0.4f} wedge width: {:0.4f}'.format(
-        coffeecan.feed_wedge_to_reflector, coffeecan.wedge_width))
+    print('wedge type offset: {:0.4f} wedge length: {:0.4f} wedge width: {:0.4f}'.format(
+        coffeecan.feed_wedge_to_reflector, coffeecan.feed_length, coffeecan.wedge_width))
 
     wavelength = 1e-6 * c_0 / targetMHz
-    vf = wavelength / coffeecan.wavelength_guide
-    length_ideal = 3. * wavelength / (4. * vf)
 
     a = 2 * np.pi / wavelength
     b = 1.8412 / radius
     print('ideal guide wavelength: {:0.4f}'.format(2 * np.pi / np.sqrt(a*a + b*b)))
-
-    print('target frequency: {:0.1f} MHz velocity factor: {:0.4f}'.format(targetMHz, vf))
-    print('wavelength: {:0.4f} guide length: {:0.4f} can length: {:0.4f} m'.format(wavelength, coffeecan.wavelength_guide, length))
-
-    print('dim in m radius: {:0.4f} patch size: {:0.6f} can length: {:0.4f}'.format(radius, lp, length))
-    print('fraction radius: {:0.4f} patch size: {:0.4f} can length: {:0.4f}'.format(
-        radius/coffeecan.wavelength_guide, lp/coffeecan.wavelength_guide, length/coffeecan.wavelength_guide))
+    print('target frequency: {:0.1f} MHz'.format(targetMHz))
 
     # match original dimensions from https://www.extremetech.com/archive/56984-building-a-wifi-antenna-out-of-a-tin-can
-    wegoffset = 0.028
+    seq.wegoff_wav = seq.wegoffset / coffeecan.wavelength_guide
     stublength = distance((0.0354, 0.0354, 0.028), (0.034, 0.034, 0.028)) # 0.001979898987322331
     wegd = distance((.034, .034, .028), (.016, .016, .026))   # 0.025534290669607412
     wegc = distance((.034, .034, .028), (.016, .016, .028))   # 0.025455844122715714
@@ -1472,32 +1596,45 @@ def canexperiment():
     wegvsin = np.sqrt(1 - wegvcos * wegvcos)
     wegwsin = np.sqrt(1 - wegwcos * wegwcos)
     print('stublength: {:0.4f} wedge length: {:0.4f} wedge width cos: {:0.4f} wedge vertical cos: {:0.4f}'.format(stublength, wegc, wegwcos, wegvcos))
-    print('check: {:0.8f} {:0.8f} and: {:0.8f} {:0.8f}'.format(wleft, wegl*wegwsin, wup, wegu*wegvsin))
 
     print('dim in m ideal wedge length: {:0.4f} actual wedge length: {:0.4f}'.format(wavelength / 5, stublength + wegc))
     print('fraction ideal wedge length: {:0.4f} actual wedge length: {:0.4f}'.format(1 / 5, stublength + wegc / wavelength
                                                                                      ))
-    print('ideal wedge offset: {:0.4f} actual wedge offset: {:0.4f}'.format(7 * wavelength / 32, wegoffset))
+    print('ideal wedge offset: {:0.4f} actual wedge offset: {:0.4f}'.format(7 * wavelength / 32, seq.wegoffset))
     wwidth = wleft + wright ; wheight = wdown + wup
     print('dim in m width of wedge: {:0.4f} height of wedge: {:0.4f}'.format(wwidth, wheight))
     print('fraction width of wedge: {:0.4f} height of wedge: {:0.4f}'.format(wwidth/wavelength, wheight/wavelength))
 
-    # adjust the height of the patch to ensure that the feed is central
-    dangle = 90. / 9.
+    # adjust the height of the patch to ensure that the feed is patch central
+    dangle = 90. / seq.dangle_div
     a1 = dangle * np.pi / 180
     sinah = np.sin(a1/2)
     lh = radius * sinah
-    n_patches_to_feed = np.rint((wegoffset - lh) / (2. * lh)) + .5
-    frac = wegoffset / (n_patches_to_feed * 2. * lh)
+    n_patches_to_feed = np.rint((seq.wegoffset - lh * (seq.frac_woff_plen - .5)) / (2. * lh)) + (seq.frac_woff_plen - .5)
+    frac = seq.wegoffset / (n_patches_to_feed * 2. * lh)
+    print('INFO wegoffset: {:0.4f} patch side height: {:0.4f} width: {:0.4f}'.format(seq.wegoffset, 2. * lh * frac, 2. * lh))
     if frac < 0:
         frac = 1.0
+
+    seq.frac = frac
+
+    patchheight = lh * 2 * frac
+
+    AUTOLEN = True
+    frac_clen = seq.frac_clen
+    if AUTOLEN or 0 < frac_clen:
+        canheight_fixed_patch = patchheight * (np.rint(target_canlength/patchheight) - 1)
+        canheight_remainder = target_canlength - canheight_fixed_patch
+        if AUTOLEN:
+            frac_clen = canheight_remainder / (2 * patchheight)
+            seq.frac_clen = frac_clen
 
     centre = (.0,.0,.0)
     rot = Rotator(angle = dangle, x_radius = radius)
     c1 = rot.c1
     c2 = rot.c2
     ct = rot.ct
-    cntr = centreNew(ct, centre, wegoffset)
+    cntr = centreNew(ct, centre, seq.wegoffset)
     p1 = pointNew(c1, c2, ct, cntr, radius, 0.) ; p2 = pointNew(c1, c2, ct, cntr,
                                                                 radius * np.cos(dangle * np.pi / 180),
                                                                 radius * np.sin(dangle * np.pi / 180))
@@ -1517,11 +1654,11 @@ def canexperiment():
     can = Shape(material = al, n_points = n_feed_points, n_lines = n_feed_lines)
     setcoord(can.centre, centre)
 
-    can = createCanPatch(centre, rot, can = can, length = length, frac = frac)
+    can = createCanPatch(centre, rot, can = can, length = target_canlength, frac = frac, frac_clen = frac_clen)
     if 0:
         for idx, s in enumerate(can.surfaces):
             print('{}: n_points: {} n_lines: {} surface: {}'.format(idx, s.points.shape[1], s.lines.shape[1], s.surface))
-    if 1:
+    if 0:
         # use the centre of the cylinder patch to select a suitable feed point (wegoffset)
         for idx, l in enumerate(can.surfaces[0].surface[2, :]):
             point = can.surfaces[0].lines[0, abs(l)-1]
@@ -1532,9 +1669,12 @@ def canexperiment():
 
             pre = pos
 
+    seq.canheight_actual = can.surfaces[0].points[:, 0][rot.ct]
+    print('INFO total can height: {:0.4f}'.format(seq.canheight_actual))
+
     # now create the feed wedge
     point = 0 ; line = 0
-    setcoord(can.points[:, point], (patchc, 0., wegoffset)) ; point += 1
+    setcoord(can.points[:, point], (patchc, 0., seq.wegoffset)) ; point += 1
 
     # create feed point at start of wedge
     can.feedline = line
@@ -1542,27 +1682,40 @@ def canexperiment():
 
     # now complete the feed line stub
     endofstub = point
-    setcoord(can.points[:, point], (patchc - stublength, 0., wegoffset)) ; point += 1
+    setcoord(can.points[:, point], (patchc - stublength, 0., seq.wegoffset)) ; point += 1
     setcoord(can.lines[:,line], (point-2, endofstub)) ; line += 1
 
     # wegd
+    wegc = wegc + seq.delta_weglen
+
     hv = wegc / wegvcos
     zdelta = hv * wegvsin
-    setcoord(can.points[:, point], (patchc - stublength - wegc, 0., wegoffset - zdelta)) ; point += 1
+    setcoord(can.points[:, point], (patchc - stublength - wegc, 0., seq.wegoffset - zdelta)) ; point += 1
     setcoord(can.lines[:,line], (endofstub, point - 1)) ; line += 1
-    setcoord(can.points[:, point], (patchc - stublength - wegc, 0., wegoffset)) ; point += 1
-    setcoord(can.lines[:,line], (endofstub, point - 1)) ; line += 1
-    setcoord(can.points[:, point], (patchc - stublength - wegc, 0., wegoffset + zdelta)) ; point += 1
-    setcoord(can.lines[:,line], (endofstub, point - 1)) ; line += 1
-    hw = wegc / wegwcos
-    ydelta = hw * wegwsin
-    setcoord(can.points[:, point], (patchc - stublength - wegc, 0. - ydelta, wegoffset)) ; point += 1
-    setcoord(can.lines[:,line], (endofstub, point - 1)) ; line += 1
-    setcoord(can.points[:, point], (patchc - stublength - wegc, 0. + ydelta, wegoffset)) ; point += 1
+    setcoord(can.points[:, point], (patchc - stublength - wegc, 0., seq.wegoffset)) ; point += 1
     setcoord(can.lines[:,line], (endofstub, point - 1)) ; line += 1
 
+    seq.weglength = line_length(can.points, can.lines[:, line-3]) + line_length(can.points, can.lines[:, line-1])
+    seq.wegl_wav = seq.weglength / wavelength
+
+    setcoord(can.points[:, point], (patchc - stublength - wegc, 0., seq.wegoffset + zdelta)) ; point += 1
+    setcoord(can.lines[:,line], (endofstub, point - 1)) ; line += 1
+
+    seq.wegheight = distance(can.points[:, point - 3], can.points[:, point - 1])
+    seq.wegh_wav = seq.wegheight / wavelength
+
+    hw = wegc / wegwcos
+    ydelta = hw * wegwsin + seq.delta_wegwidth / 2.
+    setcoord(can.points[:, point], (patchc - stublength - wegc, 0. - ydelta, seq.wegoffset)) ; point += 1
+    setcoord(can.lines[:,line], (endofstub, point - 1)) ; line += 1
+    setcoord(can.points[:, point], (patchc - stublength - wegc, 0. + ydelta, seq.wegoffset)) ; point += 1
+    setcoord(can.lines[:,line], (endofstub, point - 1)) ; line += 1
+
+    seq.wegwidth = distance(can.points[:, point - 2], can.points[:, point - 1])
+    seq.wegw_wav = seq.wegwidth / wavelength
+
     name = 'can'
-    segperwave = 100
+    segperwave = 6
     segmentsize = wavelength / segperwave
     print('segment size: {:0.4f}'.format(1/segperwave))
 
@@ -1572,7 +1725,7 @@ def canexperiment():
     plotStart = startMHz / targetMHz
     plotRange = rangeMHz / targetMHz
     plotFreqMHz = startMHz
-    plotStepCount = 100
+    plotStepCount = rangeMHz / 10
 
     comments = ['{} can antenna for {} MHz'.format(al.name, targetMHz)]
     comments.append('Drafted using antenna.py and net2utils.py')
@@ -1582,5 +1735,120 @@ def canexperiment():
                     wavelength, wireRadius, segmentsize, [can],
                     targetMHz, plotStart = startMHz / targetMHz, plotRange = rangeMHz / targetMHz, plotStepCount = plotStepCount)
 
+def canresults(seq):
+    for idx, title in enumerate(seq.titles):
+        if 'vswr' in title:
+            vswridx = idx
+            for r in range(seq.csvalues.shape[1]):
+                seq.csvalues[idx, r] = seq.csvalues[idx, r] if 0 < seq.csvalues[idx, r] else 999.
+        if 'mhz' in title:
+            mhzidx = idx
+
+    if seq.closestidx < 0:
+        diff = np.abs(seq.csvalues[mhzidx, :] - seq.targetMHz)
+        seq.closestidx = np.argmax(-diff[:])
+
+    n_min = np.argmax(-seq.csvalues[vswridx, :])
+    print('min vswr: {} @ frequency: {}'.format(seq.csvalues[vswridx, n_min], seq.csvalues[mhzidx, n_min]))
+
+    seq.setresult('target_canlength', seq.target_canlength)
+    seq.setresult('canheight_actual', seq.canheight_actual)
+    seq.setresult('wegoffset', seq.wegoffset)
+    seq.setresult('wegoff_wav', seq.wegoff_wav)
+    seq.setresult('weglength', seq.weglength)
+    seq.setresult('wegl_wav', seq.wegl_wav)
+    seq.setresult('wegwidth', seq.wegwidth)
+    seq.setresult('wegw_wav', seq.wegw_wav)
+    seq.setresult('wegheight', seq.wegheight)
+    seq.setresult('wegh_wav', seq.wegh_wav)
+    seq.setresult('dangle_div', seq.dangle_div)
+    seq.setresult('frac_woff_plen', seq.frac_woff_plen)
+    seq.setresult('frac_clen', seq.frac_clen)
+    seq.setresult('delta_weglen', seq.delta_weglen)
+    seq.setresult('delta_wegwidth', seq.delta_wegwidth)
+
+    seq.setresult('frequency_ontarget', seq.csvalues[mhzidx, seq.closestidx])
+    seq.setresult('vswr_ontarget', seq.csvalues[vswridx, seq.closestidx])
+    seq.setresult('frequency_lowestvswr', seq.csvalues[mhzidx, n_min])
+    seq.setresult('vswr_lowest', seq.csvalues[vswridx, n_min])
+    seq.setresult('{}_variable'.format(seq.variable), getattr(seq, seq.variable))
+
 if __name__ == '__main__':
-    canexperiment()
+    if 0:
+        # single run of the nec file generator
+        seq = DataStore()
+        seq.target_canlength = 0.159
+        seq.wegoffset = 0.026
+        seq.dangle_div = 6
+        seq.frac_woff_plen = 0.5 # 0.38 # 0.4 # 0.35#
+        seq.frac_clen = 0.5
+        seq.delta_weglen = 0.003
+        seq.delta_wegwidth = 0.0006
+        canexperiment(seq)
+    else:
+        # optimisation with the sequencer and xnec2c.  Run this command first
+        # xnec2c --skip-verify --optimize --write-csv can_2437.csv can_2437.nec &
+        import csv
+        import time
+
+        n_values = 21
+        n_samples = 10
+        seq = Sequencer('can_2437', n_values, n_samples)
+
+        # choose the parameter to modify
+        seq.variable = 'wegoffset'
+        # possible variables
+        seq.target_canlength = 0.159
+        seq.wegoffset = 0.020
+        seq.dangle_div = 6
+        seq.frac_woff_plen = 0.5
+        seq.frac_clen = -1.
+        seq.delta_weglen = 0.003
+        seq.delta_wegwidth = 0.0006
+
+        # delta values to be applied if appropriate
+        seq.target_canlength_delta = 0.0005
+        seq.wegoffset_delta = 0.001
+        seq.dangle_div_delta = 1
+        seq.frac_woff_plen_delta = 0.01
+        seq.frac_clen_delta = 0.05
+        seq.delta_weglen_delta = 0.001
+        seq.delta_wegwidth_delta = 0.0001
+
+        n_vswrs = 10
+        seq.prep_gather(n_vswrs, ['mhz', 'vswr'])
+        seq.closestidx = -1
+
+        for i in seq:
+            seq.clear_to('stimulus')
+            canexperiment(seq)
+            print(['{}: {:0.4f}'.format(name, getattr(seq, name)) for name in seq.createdafter('stimulus')])
+            time.sleep(7)
+            seq.gather_results(canresults)
+
+        seq.save_results()
+
+        onfreqidx = seq.results.dataidxs['vswr_ontarget']
+        lowestonfrequencyvswridx =  np.argmax(-seq.results.datastore[onfreqidx, :])
+        lowestidx = seq.results.dataidxs['vswr_lowest']
+        lowestvswridx = np.argmax(-seq.results.datastore[lowestidx, :])
+        print('{} best vswr: {:0.4f} length: {:0.4f} frac_woff_plen: {:0.4f} frac_clen: {:0.4f} dangle_div: {}'.format(
+            seq.variable,
+            seq.results.datastore[onfreqidx, lowestonfrequencyvswridx],
+            seq.results.datastore[seq.results.dataidxs['canheight_actual'], lowestonfrequencyvswridx],
+            seq.results.datastore[seq.results.dataidxs['frac_woff_plen'], lowestonfrequencyvswridx],
+            seq.results.datastore[seq.results.dataidxs['frac_clen'], lowestonfrequencyvswridx],
+            seq.results.datastore[seq.results.dataidxs['dangle_div'], lowestonfrequencyvswridx]))
+        print('{} lowest vswr: {:0.4f} freq: {:0.2f} length: {:0.4f} frac_woff_plen: {:0.4f} frac_clen: {:0.4f} dangle_div: {}'.format(
+            seq.variable,
+            seq.results.datastore[lowestidx, lowestvswridx],
+            seq.results.datastore[seq.results.dataidxs['frequency_lowestvswr'], lowestvswridx],
+            seq.results.datastore[seq.results.dataidxs['canheight_actual'], lowestvswridx],
+            seq.results.datastore[seq.results.dataidxs['frac_woff_plen'], lowestvswridx],
+            seq.results.datastore[seq.results.dataidxs['frac_clen'], lowestvswridx],
+            seq.results.datastore[seq.results.dataidxs['dangle_div'], lowestvswridx]))
+
+        for n_results, r in enumerate(seq.results.datastore[0,:]):
+            if r < NOPOINT:
+                break
+        print('INFO n_results: {} spare: {}'.format(n_results, seq.results.datastore.shape[1] - n_results))
