@@ -670,7 +670,7 @@ class Sequencer(DataStore):
     def results(self):
         return self._results
 
-    def setresult(self, name, value):
+    def setdata(self, name, value):
         self.results.setdata(name, value)
 
     def prep_gather(self, n_csvrows, titles):
@@ -702,9 +702,66 @@ class Sequencer(DataStore):
             for i in range(self.results.datastore.shape[1]):
                 data.writerow(self.results.datastore[:, i].tolist())
 
+class BesselRoot(object):
+    def __init__(self, n, m, value, diff = False):
+        if diff: self._diff = 'diff'
+        else: self._diff = ''
+        self._n = n
+        self._m = m
+        self._value = value
+
+    def __str__(self):
+        return '{} Bessel_{}({}) = 0'.format(self._diff, self.n, self.value[self.n][self.m])
+
+    @property
+    def value(self):
+        return self._value[self.n][self.m]
+
+    @property
+    def n(self):
+        return self._n
+
+    @property
+    def m(self):
+        return self._m
+
+class TM(BesselRoot):
+    def __init__(self, n, m):
+        value = [[1., 2.405, 5.520, 8.654, 11.792],
+                 [0., 3.832, 7.016, 10.174, 13.324],
+                 [0., 5.135, 8.417, 11.620, 14.796],
+                 [0., 6.380, 9.761, 13.015, 16.223],
+                 [0., 7.588, 11.065, 14.373, 17.616],
+                 [0., 8.771, 12.339, 15.700, 18.980]]
+        super().__init__(n, m, value)
+
+    def __str__(self):
+        return 'TM{}{}'.format(self.n, self.m)
+
+    def detail(self):
+        return 'TM{}{}_value: {}'.format(self.n, self.m, self.value)
+
+class TE(BesselRoot):
+    def __init__(self, n, m):
+        value = [[0., 3.832, 7.016, 10.174, 13.324],
+                 [0.5, 1.841, 5.331, 8.536, 11.706],
+                 [0., 3.054, 6.706, 9.970, 13.170],
+                 [0., 4.201, 8.015, 11.346, 14.586],
+                 [0., 5.318, 9.282, 12.682, 15.964],
+                 [0., 6.416, 10.520, 13.987, 17.313]]
+        diff = True
+        super().__init__(n, m, value, diff)
+
+    def __str__(self):
+        return 'TE{}{}'.format(self.n, self.m)
+
+    def detail(self):
+        return 'TE{}{}_value: {}'.format(self.n, self.m, self.value)
+
 class Cantenna(object):
-    def __init__(self, freqMHz = 0, diameter = 0., length = 0., wire_guage = 8):
+    def __init__(self, mode = None, freqMHz = 0, diameter = 0., length = 0., wire_guage = 8):
         self.verbose = False
+        self._mode = mode
         self._freqMHz = freqMHz
         self._length = length
         self._wire_guage = wire_guage
@@ -718,14 +775,18 @@ class Cantenna(object):
 
     def __str__(self):
         txt = '===============\nCantenna spec\n===============\n'
-        txt += 'wavelength waveguide: {:0.4f} free space: {:0.4f}\n'.format(self.wavelength_guide, self.wavelength)
+        txt += '{} wavelength waveguide: {:0.4f} free space: {:0.4f}\n'.format(self.mode, self.wavelength_guide, self.wavelength)
         txt += 'feed length: {:0.4f} pin distance from reflector: {:0.4f}\n'.format(self.feed_length, self.feed_pin_to_reflector)
         txt += 'can inside length: {:0.4f} (distance pin feed to rim: {:0.4f})\n'.format(self.inside_length, self.edge_to_pin_feed)
         txt += 'can diameter: {:0.4f} can radius: {:0.4f}\n'.format(self.diameter, self.diameter/2.)
         txt += 'frequency min: {:0.3f} target: {:0.3f} max: {:0.3f}\n'.format(self.freq_minMHz, self.freqMHz, self.freq_maxMHz)
-        txt += 'frequency cutoff TE11: {:0.3f} secondary TM01: {:0.3f}\n'.format(self.freq_cutoffTE11MHz, self.freq_cutoffTM01MHz)
+        txt += 'frequency cutoff {}: {:0.3f}\n'.format(self.mode, self.freq_cutoffMHz)
         txt += '==============='
         return txt
+
+    @property
+    def mode(self):
+        return self._mode
 
     @property
     def freqMHz(self):
@@ -848,18 +909,11 @@ class Cantenna(object):
         return self._freq_maxMHz
 
     @property
-    def freq_cutoffTE11MHz(self):
-        if not hasattr(self, '_freq_cutoffTE11MHz'):
-            if self.verbose: print('new _freq_cutoffTE11MHz')
-            self._freq_cutoffTE11MHz = 1.8412 * c_0 * 1e-6 / (2. * np.pi * self.radius)
-        return self._freq_cutoffTE11MHz
-
-    @property
-    def freq_cutoffTM01MHz(self):
-        if not hasattr(self, '_freq_cutoffTM01MHz'):
-            if self.verbose: print('new _freq_cutoffTM01MHz')
-            self._freq_cutoffTM01MHz = 1.147 * c_0 * 1e-6 / (2. * np.pi * self.radius)
-        return self._freq_cutoffTM01MHz
+    def freq_cutoffMHz(self):
+        if not hasattr(self, '_freq_cutoffMHz'):
+            if self.verbose: print('new _freq_cutoffMHz')
+            self._freq_cutoffMHz = self.mode.value * c_0 * 1e-6 / (2. * np.pi * self.radius)
+        return self._freq_cutoffMHz
 
     @property
     def wavelength(self):
@@ -873,11 +927,11 @@ class Cantenna(object):
         # lg
         if not hasattr(self, '_wavelength_guide'):
             if self.verbose: print('new _wavelength_guide')
-            lc2 = self.dominant_cutoff_length**2
+            lc2 = self.cutoff_length**2
             wl2 = self.wavelength**2
             if lc2 < wl2:
                 wl2 = lc2 - .00000001
-                print('WARNING dominant_cutoff_length < wavelength')
+                print('WARNING cutoff_length < wavelength')
             self._wavelength_guide = np.sqrt(lc2 * wl2 / (lc2 - wl2))
         return self._wavelength_guide
 
@@ -898,16 +952,16 @@ class Cantenna(object):
         return self._upper_usable_length
 
     @property
-    def dominant_cutoff_length(self):
+    def cutoff_length(self):
         # lc
-        if not hasattr(self, '_dominant_cutoff_length'):
-            if self.verbose: print('new _dominant_cutoff_length')
-            self._dominant_cutoff_length = 3.41 * self.diameter / 2.
-        return self._dominant_cutoff_length
+        if not hasattr(self, '_cutoff_length'):
+            if self.verbose: print('new _cutoff_length')
+            self._cutoff_length = 2. * np.pi * self.diameter / (2. * self.mode.value)
+        return self._cutoff_length
 
     def _clear_derived(self):
-        for n in ['_radius', '_lower_usable_length', '_upper_usable_length', '_dominant_cutoff_length',
-                  '_wavelength', '_wavelength_guide', '_freq_cutoffTE11MHz', '_freq_cutoffTM01MHz',
+        for n in ['_radius', '_lower_usable_length', '_upper_usable_length', '_cutoff_length',
+                  '_wavelength', '_wavelength_guide', '_freq_cutoffMHz',
                   '_freq_maxMHz', '_freq_minMHz',
                   '_edge_to_pin_feed', '_edge_to_wedge_feed', '_feed_pin_to_reflector', '_feed_wedge_to_reflector',
                   '_feed_length', '_feed_radius', '_wedge_width']:
@@ -1567,11 +1621,14 @@ def canexperiment(seq):
     radius = lp / (2 * np.sin(18 * np.pi / (180 * 2)))
     target_canlength = seq.target_canlength
 
-    coffeecan =  Cantenna(freqMHz = targetMHz, diameter = radius * 2, wire_guage = 9)
+    dominantmode = Cantenna(mode = TE(1,1), freqMHz = targetMHz, diameter = radius * 2, wire_guage = 9)
+    print(dominantmode)
+    coffeecan = Cantenna(mode = TM(0,1), freqMHz = targetMHz, diameter = radius * 2, wire_guage = 9)
     print(coffeecan)
     print('wedge type offset: {:0.4f} wedge length: {:0.4f} wedge width: {:0.4f}'.format(
-        coffeecan.feed_wedge_to_reflector, coffeecan.feed_length, coffeecan.wedge_width))
-
+        0.14 * dominantmode.wavelength_guide, coffeecan.feed_length, coffeecan.wedge_width))
+    seq.tm01wavelength = coffeecan.wavelength_guide
+    seq.domwavelength = dominantmode.wavelength_guide
     wavelength = 1e-6 * c_0 / targetMHz
 
     a = 2 * np.pi / wavelength
@@ -1613,6 +1670,8 @@ def canexperiment(seq):
     n_patches_to_feed = np.rint((seq.wegoffset - lh * (seq.frac_woff_plen - .5)) / (2. * lh)) + (seq.frac_woff_plen - .5)
     frac = seq.wegoffset / (n_patches_to_feed * 2. * lh)
     print('INFO wegoffset: {:0.4f} patch side height: {:0.4f} width: {:0.4f}'.format(seq.wegoffset, 2. * lh * frac, 2. * lh))
+    print('INFO fraction wegoffset: {:0.4f} frac of mode wegoffset: {:0.4f}'.format(
+        seq.wegoffset / dominantmode.wavelength_guide, seq.wegoffset / coffeecan.wavelength_guide))
     if frac < 0:
         frac = 1.0
 
@@ -1735,6 +1794,26 @@ def canexperiment(seq):
                     wavelength, wireRadius, segmentsize, [can],
                     targetMHz, plotStart = startMHz / targetMHz, plotRange = rangeMHz / targetMHz, plotStepCount = plotStepCount)
 
+def cancalcresults(seq):
+    seq.setdata('targetMHz', seq.targetMHz)
+    seq.setdata('dom guide wavelength', seq.domwavelength)
+    seq.setdata('TM01 guide wavelength', seq.tm01wavelength)
+    seq.setdata('target_canlength', seq.target_canlength)
+    seq.setdata('canheight_actual', seq.canheight_actual)
+    seq.setdata('wegoffset', seq.wegoffset)
+    seq.setdata('wegoff_wav', seq.wegoff_wav)
+    seq.setdata('weglength', seq.weglength)
+    seq.setdata('wegl_wav', seq.wegl_wav)
+    seq.setdata('wegwidth', seq.wegwidth)
+    seq.setdata('wegw_wav', seq.wegw_wav)
+    seq.setdata('wegheight', seq.wegheight)
+    seq.setdata('wegh_wav', seq.wegh_wav)
+    seq.setdata('dangle_div', seq.dangle_div)
+    seq.setdata('frac_woff_plen', seq.frac_woff_plen)
+    seq.setdata('frac_clen', seq.frac_clen)
+    seq.setdata('delta_weglen', seq.delta_weglen)
+    seq.setdata('delta_wegwidth', seq.delta_wegwidth)
+
 def canresults(seq):
     for idx, title in enumerate(seq.titles):
         if 'vswr' in title:
@@ -1751,32 +1830,20 @@ def canresults(seq):
     n_min = np.argmax(-seq.csvalues[vswridx, :])
     print('min vswr: {} @ frequency: {}'.format(seq.csvalues[vswridx, n_min], seq.csvalues[mhzidx, n_min]))
 
-    seq.setresult('target_canlength', seq.target_canlength)
-    seq.setresult('canheight_actual', seq.canheight_actual)
-    seq.setresult('wegoffset', seq.wegoffset)
-    seq.setresult('wegoff_wav', seq.wegoff_wav)
-    seq.setresult('weglength', seq.weglength)
-    seq.setresult('wegl_wav', seq.wegl_wav)
-    seq.setresult('wegwidth', seq.wegwidth)
-    seq.setresult('wegw_wav', seq.wegw_wav)
-    seq.setresult('wegheight', seq.wegheight)
-    seq.setresult('wegh_wav', seq.wegh_wav)
-    seq.setresult('dangle_div', seq.dangle_div)
-    seq.setresult('frac_woff_plen', seq.frac_woff_plen)
-    seq.setresult('frac_clen', seq.frac_clen)
-    seq.setresult('delta_weglen', seq.delta_weglen)
-    seq.setresult('delta_wegwidth', seq.delta_wegwidth)
+    cancalcresults(seq)
 
-    seq.setresult('frequency_ontarget', seq.csvalues[mhzidx, seq.closestidx])
-    seq.setresult('vswr_ontarget', seq.csvalues[vswridx, seq.closestidx])
-    seq.setresult('frequency_lowestvswr', seq.csvalues[mhzidx, n_min])
-    seq.setresult('vswr_lowest', seq.csvalues[vswridx, n_min])
-    seq.setresult('{}_variable'.format(seq.variable), getattr(seq, seq.variable))
+    seq.setdata('frequency_ontarget', seq.csvalues[mhzidx, seq.closestidx])
+    seq.setdata('vswr_ontarget', seq.csvalues[vswridx, seq.closestidx])
+    seq.setdata('frequency_lowestvswr', seq.csvalues[mhzidx, n_min])
+    seq.setdata('vswr_lowest', seq.csvalues[vswridx, n_min])
+    seq.setdata('{}_variable'.format(seq.variable), getattr(seq, seq.variable))
 
 if __name__ == '__main__':
     if 0:
         # single run of the nec file generator
-        seq = DataStore()
+        n_values = 18
+        n_samples = 1
+        seq = DataStore(n_values, n_samples)
         seq.target_canlength = 0.159
         seq.wegoffset = 0.026
         seq.dangle_div = 6
@@ -1785,13 +1852,17 @@ if __name__ == '__main__':
         seq.delta_weglen = 0.003
         seq.delta_wegwidth = 0.0006
         canexperiment(seq)
+        cancalcresults(seq)
+        for i in range(n_values):
+            print('{}'.format(seq.datastore[i, 0]), end=',')
+        print()
     else:
         # optimisation with the sequencer and xnec2c.  Run this command first
         # xnec2c --skip-verify --optimize --write-csv can_2437.csv can_2437.nec &
         import csv
         import time
 
-        n_values = 21
+        n_values = 24
         n_samples = 10
         seq = Sequencer('can_2437', n_values, n_samples)
 
